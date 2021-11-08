@@ -5,8 +5,6 @@
 package com.pauldemarco.flutter_blue;
 
 import android.app.Activity;
-import android.Manifest;
-import android.annotation.TargetApi;
 import android.app.Application;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -14,35 +12,33 @@ import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
-import android.bluetooth.BluetoothGattServer;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
-import android.bluetooth.le.BluetoothLeScanner;
-import android.bluetooth.le.ScanCallback;
-import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
-import android.bluetooth.le.ScanSettings;
+import android.companion.AssociationRequest;
+import android.companion.BluetoothLeDeviceFilter;
+import android.companion.CompanionDeviceManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.IntentSender;
 import android.content.pm.PackageManager;
-import android.os.Build;
-import android.os.ParcelUuid;
 import android.util.Log;
+
+import androidx.annotation.NonNull;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
-
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
+import java.util.regex.Pattern;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.activity.ActivityAware;
@@ -55,15 +51,13 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
-import io.flutter.plugin.common.PluginRegistry;
+import io.flutter.plugin.common.PluginRegistry.ActivityResultListener;
 import io.flutter.plugin.common.PluginRegistry.Registrar;
-import io.flutter.plugin.common.PluginRegistry.RequestPermissionsResultListener;
-
 
 /** FlutterBluePlugin */
-public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCallHandler, RequestPermissionsResultListener  {
+public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCallHandler, ActivityResultListener {
     private static final String TAG = "FlutterBluePlugin";
-    private Object initializationLock = new Object();
+    private final Object initializationLock = new Object();
     private Context context;
     private MethodChannel channel;
     private static final String NAMESPACE = "plugins.pauldemarco.com/flutter_blue";
@@ -71,60 +65,58 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     private EventChannel stateChannel;
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;
+    private CompanionDeviceManager mCompanionDeviceManager;
 
     private FlutterPluginBinding pluginBinding;
     private ActivityPluginBinding activityBinding;
-    private Application application;
     private Activity activity;
 
-    private static final int REQUEST_FINE_LOCATION_PERMISSIONS = 1452;
+    private static final int SELECT_DEVICE_REQUEST_CODE = 587643;
+    private static final int ENABLE_BLUETOOTH_REQUEST_CODE = 1468;
     static final private UUID CCCD_ID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private final Map<String, BluetoothDeviceCache> mDevices = new HashMap<>();
     private LogLevel logLevel = LogLevel.EMERGENCY;
-
-    // Pending call and result for startScan, in the case where permissions are needed
-    private MethodCall pendingCall;
-    private Result pendingResult;
-    private ArrayList<String> macDeviceScanned = new ArrayList<>();
-    private boolean allowDuplicates = false;
 
     /** Plugin registration. */
     public static void registerWith(Registrar registrar) {
         FlutterBluePlugin instance = new FlutterBluePlugin();
         Activity activity = registrar.activity();
-        Application application = null;
         if (registrar.context() != null) {
-            application = (Application) (registrar.context().getApplicationContext());
+            Application application = (Application) (registrar.context().getApplicationContext());
+            instance.setup(registrar.messenger(), application, activity, null);
+        } else {
+            Log.e(TAG, "Registration failed, as context is null");
         }
-        instance.setup(registrar.messenger(), application, activity, registrar, null);
     }
 
     public FlutterBluePlugin() {}
 
     @Override
-    public void onAttachedToEngine(FlutterPluginBinding binding) {
+    public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
+        Log.d(TAG, "Attached to engine " + binding.getApplicationContext().toString());
         pluginBinding = binding;
     }
 
     @Override
-    public void onDetachedFromEngine(FlutterPluginBinding binding) {
+    public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
+        Log.d(TAG, "Detaching from engine");
         pluginBinding = null;
-
     }
 
     @Override
-    public void onAttachedToActivity(ActivityPluginBinding binding) {
+    public void onAttachedToActivity(@NonNull ActivityPluginBinding binding) {
         activityBinding = binding;
+        Log.d(TAG, "Attached to activity " + binding.getActivity().toString());
         setup(
                 pluginBinding.getBinaryMessenger(),
                 (Application) pluginBinding.getApplicationContext(),
                 activityBinding.getActivity(),
-                null,
-                activityBinding);
+                binding);
     }
 
     @Override
     public void onDetachedFromActivity() {
+        Log.d(TAG, "Detaching from activity");
         tearDown();
     }
 
@@ -134,7 +126,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     }
 
     @Override
-    public void onReattachedToActivityForConfigChanges(ActivityPluginBinding binding) {
+    public void onReattachedToActivityForConfigChanges(@NonNull ActivityPluginBinding binding) {
         onAttachedToActivity(binding);
     }
 
@@ -142,33 +134,43 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             final BinaryMessenger messenger,
             final Application application,
             final Activity activity,
-            final PluginRegistry.Registrar registrar,
             final ActivityPluginBinding activityBinding) {
         synchronized (initializationLock) {
             Log.i(TAG, "setup");
+            if (activity == null) {
+                return;
+            }
             this.activity = activity;
-            this.application = application;
             this.context = application;
             channel = new MethodChannel(messenger, NAMESPACE + "/methods");
             channel.setMethodCallHandler(this);
             stateChannel = new EventChannel(messenger, NAMESPACE + "/state");
             stateChannel.setStreamHandler(stateHandler);
-            mBluetoothManager = (BluetoothManager) application.getSystemService(Context.BLUETOOTH_SERVICE);
-            mBluetoothAdapter = mBluetoothManager.getAdapter();
-            if (registrar != null) {
-                // V1 embedding setup for activity listeners.
-                registrar.addRequestPermissionsResultListener(this);
-            } else {
-                // V2 embedding setup for activity listeners.
-                activityBinding.addRequestPermissionsResultListener(this);
+
+            if(activityBinding != null) {
+                activityBinding.addActivityResultListener(this);
             }
+
+            // Turn on bluetooth
+            mBluetoothManager = (BluetoothManager) activity.getSystemService(Context.BLUETOOTH_SERVICE);
+            mBluetoothAdapter = mBluetoothManager.getAdapter();
+            turnBluetoothOn();
+
+            // Check if CDP is supported
+            boolean isSupportCdp = this.context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP);
+            Log.d(TAG, "isSupportCdp: $isSupportCdp");
+            if (!isSupportCdp) {
+                Log.e(TAG, "CDP is not supported, quitting");
+                tearDown();
+                return;
+            }
+            mCompanionDeviceManager = (CompanionDeviceManager) activity.getSystemService(Context.COMPANION_DEVICE_SERVICE);
         }
     }
 
     private void tearDown() {
         Log.i(TAG, "teardown");
         context = null;
-        activityBinding.removeRequestPermissionsResultListener(this);
         activityBinding = null;
         channel.setMethodCallHandler(null);
         channel = null;
@@ -176,12 +178,132 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         stateChannel = null;
         mBluetoothAdapter = null;
         mBluetoothManager = null;
-        application = null;
     }
 
+    private void scanForBLE(Pattern deviceNamePattern) {
+        // Preconditions
+        if(activity == null || mCompanionDeviceManager == null) {
+            throw new IllegalStateException("Activity is null", null);
+        }
+
+        // To skip filtering based on name and supported feature flags (UUIDs),
+        // don't include calls to setNamePattern() and addServiceUuid(),
+        // respectively. This example uses Bluetooth.
+        BluetoothLeDeviceFilter deviceFilter =  new BluetoothLeDeviceFilter.Builder()
+                .setNamePattern(deviceNamePattern)
+                .build();
+        Log.d(TAG, "BLE device filter set");
+
+        // The argument provided in setSingleDevice() determines whether a single
+        // device name or a list of device names is presented to the user as
+        // pairing options.
+        AssociationRequest pairingRequest = new AssociationRequest.Builder()
+                .addDeviceFilter(deviceFilter)
+                .setSingleDevice(false)
+                .build();
+        Log.d(TAG, "Pairing request created, trying to associate");
+
+        // When the app tries to pair with the Bluetooth device, show the
+        // appropriate pairing request dialog to the user.
+        final Activity activity = this.activity;
+        mCompanionDeviceManager.associate(
+            pairingRequest,
+            new CompanionDeviceManager.Callback() {
+                @Override
+                public void onDeviceFound(IntentSender chooserLauncher) {
+                    Log.d(TAG, "Device found");
+                    try {
+                        activity.startIntentSenderForResult(
+                                chooserLauncher,
+                                SELECT_DEVICE_REQUEST_CODE, null, 0, 0, 0
+                        );
+                    } catch (IntentSender.SendIntentException exception) {
+                        Log.e(TAG, "Error in starting intent");
+                    }
+                }
+
+                @Override
+                public void onFailure(CharSequence error) {
+
+                    Log.e(TAG, "Associate error");
+                }
+            }, null
+        );
+    }
+
+    private void connect(String deviceId) {
+        Log.d(TAG, "Bonding to ${device.name} at address: ${device.address}");
+        BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
+        boolean isConnected = mBluetoothManager.getConnectedDevices(BluetoothProfile.GATT).contains(device);
+
+        // If device is already connected, return error
+        if(mDevices.containsKey(deviceId) && isConnected) {
+            throw(new IllegalStateException("Connection with device " + deviceId + "already exists", null));
+        }
+
+        // If device was connected to previously but is now disconnected, attempt a reconnect
+        if(mDevices.containsKey(deviceId) && !isConnected) {
+            if(Objects.requireNonNull(mDevices.get(deviceId)).gatt.connect()){
+                return;
+            } else {
+                throw(new RuntimeException("Error when reconnecting to device " + deviceId, null));
+            }
+        }
+
+        // New request, connect and add gattServer to Map
+        BluetoothGatt gattServer;
+        gattServer = device.connectGatt(context, false, mGattCallback, BluetoothDevice.TRANSPORT_LE);
+        mDevices.put(deviceId, new BluetoothDeviceCache(gattServer));
+    }
 
     @Override
-    public void onMethodCall(MethodCall call, Result result) {
+    public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
+        Log.d(TAG, "on Activity Result: $resultCode");
+        switch(requestCode) {
+            case ENABLE_BLUETOOTH_REQUEST_CODE:
+            {
+                if (resultCode == Activity.RESULT_OK) {
+                    Log.d(TAG, "Bluetooth Enabled");
+                    return true;
+                } else {
+                    Log.e(TAG, "Bluetooth not permitted, cannot proceed");
+                    turnBluetoothOn();
+                }
+                break;
+            }
+
+            case SELECT_DEVICE_REQUEST_CODE:
+            {
+                if (resultCode == Activity.RESULT_OK) {
+                    // User has chosen to pair with the Bluetooth device.
+                    ScanResult result = data.getParcelableExtra(CompanionDeviceManager.EXTRA_DEVICE);
+                    if (result != null && result.getDevice() != null) {
+                        Protos.ScanResult scanResult = ProtoMaker.from(result.getDevice(), result);
+                        invokeMethodUIThread("ScanResult", scanResult.toByteArray());
+                        connect(result.getDevice().getAddress());
+                        return true;
+                    } else {
+                        Log.e(TAG, "Invalid scan result ${result.toString()}");
+                    }
+                }
+                else {
+                    Log.e(TAG, "Pairing cancelled, cannot proceed");
+                }
+                break;
+            }
+        }
+        return false;
+    }
+
+    private void turnBluetoothOn() {
+        if (!mBluetoothAdapter.isEnabled()) {
+            Intent enableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
+            this.activity.startActivityForResult(enableIntent, ENABLE_BLUETOOTH_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
         if(mBluetoothAdapter == null && !"isAvailable".equals(call.method)) {
             result.error("bluetooth_unavailable", "the device does not have bluetooth", null);
             return;
@@ -238,25 +360,14 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
             case "startScan":
             {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(
-                            activityBinding.getActivity(),
-                            new String[] {
-                                    Manifest.permission.ACCESS_FINE_LOCATION
-                            },
-                            REQUEST_FINE_LOCATION_PERMISSIONS);
-                    pendingCall = call;
-                    pendingResult = result;
-                    break;
-                }
-                startScan(call, result);
+                scanForBLE(Pattern.compile(".*GoPro.*"));
+                result.success(null);
                 break;
             }
 
             case "stopScan":
             {
-                stopScan();
+                // Nothing to do as we don't do explicit scans
                 result.success(null);
                 break;
             }
@@ -283,34 +394,11 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                     result.error("RuntimeException", e.getMessage(), e);
                     break;
                 }
-                String deviceId = options.getRemoteId();
-                BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
-                boolean isConnected = mBluetoothManager.getConnectedDevices(BluetoothProfile.GATT).contains(device);
-
-                // If device is already connected, return error
-                if(mDevices.containsKey(deviceId) && isConnected) {
-                    result.error("already_connected", "connection with device already exists", null);
-                    return;
+                try {
+                    connect(options.getRemoteId());
+                } catch (Exception e) {
+                    result.error("RunTimeError", "Failed to connect to BLE devices", e);
                 }
-
-                // If device was connected to previously but is now disconnected, attempt a reconnect
-                if(mDevices.containsKey(deviceId) && !isConnected) {
-                    if(mDevices.get(deviceId).gatt.connect()){
-                        result.success(null);
-                    } else {
-                        result.error("reconnect_error", "error when reconnecting to device", null);
-                    }
-                    return;
-                }
-
-                // New request, connect and add gattServer to Map
-                BluetoothGatt gattServer;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    gattServer = device.connectGatt(context, options.getAndroidAutoConnect(), mGattCallback, BluetoothDevice.TRANSPORT_LE);
-                } else {
-                    gattServer = device.connectGatt(context, options.getAndroidAutoConnect(), mGattCallback);
-                }
-                mDevices.put(deviceId, new BluetoothDeviceCache(gattServer));
                 result.success(null);
                 break;
             }
@@ -568,7 +656,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 }
 
                 if(!cccDescriptor.setValue(value)) {
-                    result.error("set_notification_error", "error when setting the descriptor value to: " + value, null);
+                    result.error("set_notification_error", "error when setting the descriptor value to: " + Arrays.toString(value), null);
                     return;
                 }
 
@@ -611,14 +699,10 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 try {
                     gatt = locateGatt(request.getRemoteId());
                     int mtu = request.getMtu();
-                    if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        if(gatt.requestMtu(mtu)) {
-                            result.success(null);
-                        } else {
-                            result.error("requestMtu", "gatt.requestMtu returned false", null);
-                        }
+                    if(gatt.requestMtu(mtu)) {
+                        result.success(null);
                     } else {
-                        result.error("requestMtu", "Only supported on devices >= API 21 (Lollipop). This device == " + Build.VERSION.SDK_INT, null);
+                        result.error("requestMtu", "gatt.requestMtu returned false", null);
                     }
                 } catch(Exception e) {
                     result.error("requestMtu", e.getMessage(), e);
@@ -633,23 +717,6 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 break;
             }
         }
-    }
-
-    @Override
-    public boolean onRequestPermissionsResult(
-            int requestCode, String[] permissions, int[] grantResults) {
-        if (requestCode == REQUEST_FINE_LOCATION_PERMISSIONS) {
-            if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                startScan(pendingCall, pendingResult);
-            } else {
-                pendingResult.error(
-                        "no_permissions", "flutter_blue plugin requires location permissions for scanning", null);
-                pendingResult = null;
-                pendingCall = null;
-            }
-            return true;
-        }
-        return false;
     }
 
     private BluetoothGatt locateGatt(String remoteId) throws Exception {
@@ -699,26 +766,26 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
-                final String action = intent.getAction();
+            final String action = intent.getAction();
 
-                if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action)) {
-                    final int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE,
-                            BluetoothAdapter.ERROR);
-                    switch (state) {
-                        case BluetoothAdapter.STATE_OFF:
-                            sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.OFF).build().toByteArray());
-                            break;
-                        case BluetoothAdapter.STATE_TURNING_OFF:
-                            sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.TURNING_OFF).build().toByteArray());
-                            break;
-                        case BluetoothAdapter.STATE_ON:
-                            sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.ON).build().toByteArray());
-                            break;
-                        case BluetoothAdapter.STATE_TURNING_ON:
-                            sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.TURNING_ON).build().toByteArray());
-                            break;
-                    }
+            if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action)) {
+                final int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE,
+                        BluetoothAdapter.ERROR);
+                switch (state) {
+                    case BluetoothAdapter.STATE_OFF:
+                        sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.OFF).build().toByteArray());
+                        break;
+                    case BluetoothAdapter.STATE_TURNING_OFF:
+                        sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.TURNING_OFF).build().toByteArray());
+                        break;
+                    case BluetoothAdapter.STATE_ON:
+                        sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.ON).build().toByteArray());
+                        break;
+                    case BluetoothAdapter.STATE_TURNING_ON:
+                        sink.success(Protos.BluetoothState.newBuilder().setState(Protos.BluetoothState.State.TURNING_ON).build().toByteArray());
+                        break;
                 }
+            }
             }
         };
 
@@ -735,122 +802,6 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             context.unregisterReceiver(mReceiver);
         }
     };
-
-    private void startScan(MethodCall call, Result result) {
-        byte[] data = call.arguments();
-        Protos.ScanSettings settings;
-        try {
-            settings = Protos.ScanSettings.newBuilder().mergeFrom(data).build();
-            allowDuplicates = settings.getAllowDuplicates();
-            macDeviceScanned.clear();
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                startScan21(settings);
-            } else {
-                startScan18(settings);
-            }
-            result.success(null);
-        } catch (Exception e) {
-            result.error("startScan", e.getMessage(), e);
-        }
-    }
-
-    private void stopScan() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            stopScan21();
-        } else {
-            stopScan18();
-        }
-    }
-
-    private ScanCallback scanCallback21;
-
-    @TargetApi(21)
-    private ScanCallback getScanCallback21() {
-        if(scanCallback21 == null){
-            scanCallback21 = new ScanCallback() {
-
-                @Override
-                public void onScanResult(int callbackType, ScanResult result) {
-                    super.onScanResult(callbackType, result);
-                    if (!allowDuplicates && result != null && result.getDevice() != null && result.getDevice().getAddress() != null) {
-                        if (macDeviceScanned.contains(result.getDevice().getAddress())) return;
-                        macDeviceScanned.add(result.getDevice().getAddress());
-                    }
-                    Protos.ScanResult scanResult = ProtoMaker.from(result.getDevice(), result);
-                    invokeMethodUIThread("ScanResult", scanResult.toByteArray());
-                }
-
-                @Override
-                public void onBatchScanResults(List<ScanResult> results) {
-                    super.onBatchScanResults(results);
-
-                }
-
-                @Override
-                public void onScanFailed(int errorCode) {
-                    super.onScanFailed(errorCode);
-                }
-            };
-        }
-        return scanCallback21;
-    }
-
-    @TargetApi(21)
-    private void startScan21(Protos.ScanSettings proto) throws IllegalStateException {
-        BluetoothLeScanner scanner = mBluetoothAdapter.getBluetoothLeScanner();
-        if(scanner == null) throw new IllegalStateException("getBluetoothLeScanner() is null. Is the Adapter on?");
-        int scanMode = proto.getAndroidScanMode();
-        int count = proto.getServiceUuidsCount();
-        List<ScanFilter> filters = new ArrayList<>(count);
-        for(int i = 0; i < count; i++) {
-            String uuid = proto.getServiceUuids(i);
-            ScanFilter f = new ScanFilter.Builder().setServiceUuid(ParcelUuid.fromString(uuid)).build();
-            filters.add(f);
-        }
-        ScanSettings settings = new ScanSettings.Builder().setScanMode(scanMode).build();
-        scanner.startScan(filters, settings, getScanCallback21());
-    }
-
-    @TargetApi(21)
-    private void stopScan21() {
-        BluetoothLeScanner scanner = mBluetoothAdapter.getBluetoothLeScanner();
-        if(scanner != null) scanner.stopScan(getScanCallback21());
-    }
-
-    private BluetoothAdapter.LeScanCallback scanCallback18;
-
-    private BluetoothAdapter.LeScanCallback getScanCallback18() {
-        if(scanCallback18 == null) {
-            scanCallback18 = new BluetoothAdapter.LeScanCallback() {
-                @Override
-                public void onLeScan(final BluetoothDevice bluetoothDevice, int rssi,
-                                     byte[] scanRecord) {
-                    if (!allowDuplicates && bluetoothDevice != null && bluetoothDevice.getAddress() != null) {
-                        if (macDeviceScanned.contains(bluetoothDevice.getAddress())) return;
-                        macDeviceScanned.add(bluetoothDevice.getAddress());
-                    }
-
-                    Protos.ScanResult scanResult = ProtoMaker.from(bluetoothDevice, scanRecord, rssi);
-                    invokeMethodUIThread("ScanResult", scanResult.toByteArray());
-                }
-            };
-        }
-        return scanCallback18;
-    }
-
-    private void startScan18(Protos.ScanSettings proto) throws IllegalStateException {
-        List<String> serviceUuids = proto.getServiceUuidsList();
-        UUID[] uuids = new UUID[serviceUuids.size()];
-        for(int i = 0; i < serviceUuids.size(); i++) {
-            uuids[i] = UUID.fromString(serviceUuids.get(i));
-        }
-        boolean success = mBluetoothAdapter.startLeScan(uuids, getScanCallback18());
-        if(!success) throw new IllegalStateException("getBluetoothLeScanner() is null. Is the Adapter on?");
-    }
-
-    private void stopScan18() {
-        mBluetoothAdapter.stopLeScan(getScanCallback18());
-    }
 
     private final BluetoothGattCallback mGattCallback = new BluetoothGattCallback() {
         @Override
@@ -972,6 +923,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             if(status == BluetoothGatt.GATT_SUCCESS) {
                 if(mDevices.containsKey(gatt.getDevice().getAddress())) {
                     BluetoothDeviceCache cache = mDevices.get(gatt.getDevice().getAddress());
+                    assert cache != null;
                     cache.mtu = mtu;
                     Protos.MtuSizeResponse.Builder p = Protos.MtuSizeResponse.newBuilder();
                     p.setRemoteId(gatt.getDevice().getAddress());
@@ -984,7 +936,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
     enum LogLevel
     {
-        EMERGENCY, ALERT, CRITICAL, ERROR, WARNING, NOTICE, INFO, DEBUG;
+        EMERGENCY, ALERT, CRITICAL, ERROR, WARNING, NOTICE, INFO, DEBUG
     }
 
     private void log(LogLevel level, String message) {
@@ -996,17 +948,17 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     private void invokeMethodUIThread(final String name, final byte[] byteArray)
     {
         activity.runOnUiThread(
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        channel.invokeMethod(name, byteArray);
-                    }
-                });
+            new Runnable() {
+                @Override
+                public void run() {
+                    channel.invokeMethod(name, byteArray);
+                }
+            });
     }
 
     // BluetoothDeviceCache contains any other cached information not stored in Android Bluetooth API
     // but still needed Dart side.
-    class BluetoothDeviceCache {
+    static class BluetoothDeviceCache {
         final BluetoothGatt gatt;
         int mtu;
 
@@ -1015,5 +967,4 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             mtu = 20;
         }
     }
-
 }
