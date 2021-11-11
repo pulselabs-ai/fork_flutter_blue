@@ -154,7 +154,6 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             // Turn on bluetooth
             mBluetoothManager = (BluetoothManager) activity.getSystemService(Context.BLUETOOTH_SERVICE);
             mBluetoothAdapter = mBluetoothManager.getAdapter();
-            turnBluetoothOn();
 
             // Check if CDP is supported
             boolean isSupportCdp = this.context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP);
@@ -184,6 +183,11 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         // Preconditions
         if(activity == null || mCompanionDeviceManager == null) {
             throw new IllegalStateException("Activity is null", null);
+        }
+
+        // If BLE is not yet turned on, then return immediately and wait for it to be turned on
+        if (!turnBluetoothOn()) {
+            throw new IllegalStateException("Bluetooth is not enabled", null);
         }
 
         // To skip filtering based on name and supported feature flags (UUIDs),
@@ -224,7 +228,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
                 @Override
                 public void onFailure(CharSequence error) {
-
+                    invokeMethodUIThread("ScanResult", ProtoMaker.fromFailedScanAndPair().toByteArray());
                     Log.e(TAG, "Associate error");
                 }
             }, null
@@ -267,7 +271,6 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                     return true;
                 } else {
                     Log.e(TAG, "Bluetooth not permitted, cannot proceed");
-                    turnBluetoothOn();
                 }
                 break;
             }
@@ -284,10 +287,12 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                         return true;
                     } else {
                         Log.e(TAG, "Invalid scan result ${result.toString()}");
+                        invokeMethodUIThread("ScanResult", ProtoMaker.fromFailedScanAndPair().toByteArray());
                     }
                 }
                 else {
                     Log.e(TAG, "Pairing cancelled, cannot proceed");
+                    invokeMethodUIThread("ScanResult", ProtoMaker.fromFailedScanAndPair().toByteArray());
                 }
                 break;
             }
@@ -295,11 +300,13 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         return false;
     }
 
-    private void turnBluetoothOn() {
+    private boolean turnBluetoothOn() {
         if (!mBluetoothAdapter.isEnabled()) {
             Intent enableIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
             this.activity.startActivityForResult(enableIntent, ENABLE_BLUETOOTH_REQUEST_CODE);
+            return false;
         }
+        return true;
     }
 
     @Override
