@@ -43,6 +43,22 @@ public class ProtoMaker {
         return p.build();
     }
 
+    static Protos.ScanResult fromFailedScanAndPair() {
+        Protos.BluetoothDevice.Builder devP = Protos.BluetoothDevice.newBuilder();
+        devP.setRemoteId("");
+        devP.setName("");
+        devP.setType(Protos.BluetoothDevice.Type.UNKNOWN);
+
+        Protos.AdvertisementData.Builder a = Protos.AdvertisementData.newBuilder();
+        a.setConnectable(false);
+        
+        Protos.ScanResult.Builder p = Protos.ScanResult.newBuilder();
+        p.setRssi(0);
+        p.setDevice(devP.build());
+        p.setAdvertisementData(a.build());
+        return p.build();
+    }
+
     @TargetApi(21)
     static Protos.ScanResult from(BluetoothDevice device, ScanResult scanResult) {
         Protos.ScanResult.Builder p = Protos.ScanResult.newBuilder();

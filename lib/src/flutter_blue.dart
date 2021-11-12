@@ -164,7 +164,8 @@ class FlutterBlue {
             withDevices: withDevices,
             timeout: timeout,
             allowDuplicates: allowDuplicates)
-        .drain();
+        .first;
+    await stopScan();
     return _scanResults.value;
   }
 
