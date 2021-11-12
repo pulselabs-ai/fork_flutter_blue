@@ -281,6 +281,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                     return true;
                 } else {
                     Log.e(TAG, "Bluetooth not permitted, cannot proceed");
+                    invokeMethodUIThread("ScanResult", ProtoMaker.fromFailedScanAndPair().toByteArray());
                 }
                 break;
             }
