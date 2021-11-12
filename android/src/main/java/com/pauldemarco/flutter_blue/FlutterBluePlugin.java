@@ -77,16 +77,15 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     private final Map<String, BluetoothDeviceCache> mDevices = new HashMap<>();
     private LogLevel logLevel = LogLevel.EMERGENCY;
 
-    /** Plugin registration. */
+    /** V1 embedding Plugin registration. */
     public static void registerWith(Registrar registrar) {
         FlutterBluePlugin instance = new FlutterBluePlugin();
         Activity activity = registrar.activity();
+        Application application = null;
         if (registrar.context() != null) {
-            Application application = (Application) (registrar.context().getApplicationContext());
-            instance.setup(registrar.messenger(), application, activity, null);
-        } else {
-            Log.e(TAG, "Registration failed, as context is null");
+            application = (Application) (registrar.context().getApplicationContext());
         }
+        instance.setup(registrar.messenger(), application, activity, registrar, null);
     }
 
     public FlutterBluePlugin() {}
@@ -111,6 +110,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 pluginBinding.getBinaryMessenger(),
                 (Application) pluginBinding.getApplicationContext(),
                 activityBinding.getActivity(),
+                null,
                 binding);
     }
 
@@ -134,6 +134,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             final BinaryMessenger messenger,
             final Application application,
             final Activity activity,
+            final Registrar registrar,
             final ActivityPluginBinding activityBinding) {
         synchronized (initializationLock) {
             Log.i(TAG, "setup");
@@ -149,13 +150,16 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
             if(activityBinding != null) {
                 activityBinding.addActivityResultListener(this);
+            } else if (registrar != null) {
+                // V1 embedding setup for activity listeners.
+                registrar.addActivityResultListener(this);
             }
 
-            // Turn on bluetooth
+            // Get the bluetooth adapter
             mBluetoothManager = (BluetoothManager) activity.getSystemService(Context.BLUETOOTH_SERVICE);
             mBluetoothAdapter = mBluetoothManager.getAdapter();
 
-            // Check if CDP is supported
+            // Check if CDP is supported and get the CDP manager
             boolean isSupportCdp = this.context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP);
             Log.d(TAG, "isSupportCdp: $isSupportCdp");
             if (!isSupportCdp) {
@@ -170,6 +174,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
     private void tearDown() {
         Log.i(TAG, "teardown");
         context = null;
+        pluginBinding = null;
         activityBinding = null;
         channel.setMethodCallHandler(null);
         channel = null;
@@ -177,8 +182,10 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         stateChannel = null;
         mBluetoothAdapter = null;
         mBluetoothManager = null;
+        mCompanionDeviceManager = null;
     }
 
+    // Scans for Bluetooth given a device name pattern
     private void scanForBLE(Pattern deviceNamePattern) {
         // Preconditions
         if(activity == null || mCompanionDeviceManager == null) {
@@ -187,7 +194,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
         // If BLE is not yet turned on, then return immediately and wait for it to be turned on
         if (!turnBluetoothOn()) {
-            throw new IllegalStateException("Bluetooth is not enabled", null);
+            return;
         }
 
         // To skip filtering based on name and supported feature flags (UUIDs),
@@ -235,6 +242,7 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
         );
     }
 
+    /// Connect to a particular device ID
     private void connect(String deviceId) {
         Log.d(TAG, "Bonding to ${device.name} at address: ${device.address}");
         BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
@@ -268,6 +276,8 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
             {
                 if (resultCode == Activity.RESULT_OK) {
                     Log.d(TAG, "Bluetooth Enabled");
+                    // If BLE has been succesfully enabled, then search for the device
+                    scanForBLE(Pattern.compile(".*GoPro.*"));
                     return true;
                 } else {
                     Log.e(TAG, "Bluetooth not permitted, cannot proceed");

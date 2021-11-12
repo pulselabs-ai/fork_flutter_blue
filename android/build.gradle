@@ -27,6 +27,7 @@ android {
     compileSdkVersion 31
 
     defaultConfig {
+        // Companion device pairing needs a minimum SDK of 26
         minSdkVersion 26
     }
     sourceSets {
