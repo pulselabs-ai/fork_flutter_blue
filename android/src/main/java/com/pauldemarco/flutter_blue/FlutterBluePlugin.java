@@ -264,13 +264,17 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
     /// Connect to a particular device ID
     private void connect(String deviceId) {
-        Log.d(TAG, "Bonding to ${device.name} at address: ${device.address}");
+        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
         BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
+        Log.d(TAG, "Bonding to " + device.getName() + " at address: " + device.getAddress());
         boolean isConnected = mBluetoothManager.getConnectedDevices(BluetoothProfile.GATT).contains(device);
 
         // If device is already connected, return error
         if (mDevices.containsKey(deviceId) && isConnected) {
-            throw (new IllegalStateException("Connection with device " + deviceId + "already exists", null));
+            Log.e(TAG, "Connection with device " + deviceId + " already exists");
+            return;
         }
 
         // If device was connected to previously but is now disconnected, attempt a reconnect
