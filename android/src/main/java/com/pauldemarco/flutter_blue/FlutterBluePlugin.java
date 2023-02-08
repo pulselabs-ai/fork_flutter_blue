@@ -264,7 +264,8 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
 
     /// Connect to a particular device ID
     private void connect(String deviceId) {
-        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Missing bluetooth permission, so quitting")
             return;
         }
         BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(deviceId);
